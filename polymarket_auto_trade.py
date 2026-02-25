@@ -13,7 +13,7 @@ import requests
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 from dotenv import load_dotenv
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, Response, jsonify, send_from_directory, stream_with_context
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -56,77 +56,55 @@ DATA_API = "https://data-api.polymarket.com"
 CTF_CONTRACT = "0x4d97dcd97ec945f40cf65f87097ace5ea0476045"
 USDC_E_CONTRACT = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174"
 
-# 代理配置
-HTTP_PROXY = os.getenv("HTTP_PROXY", "")
+# 代理配置 (可选)
+HTTP_PROXY = os.getenv("HTTP_PROXY", "")  # 例如: http://127.0.0.1:7890
 HTTPS_PROXY = os.getenv("HTTPS_PROXY", "")
 
 # 构建代理字典
 PROXIES = {}
 if HTTP_PROXY:
     PROXIES["http"] = HTTP_PROXY
+    # log(f"使用HTTP代理: {HTTP_PROXY}", "INFO") # log function not yet defined here
 if HTTPS_PROXY:
     PROXIES["https"] = HTTPS_PROXY
-
-def parse_proxy_url(url):
-    """解析代理URL，返回 (host, port, auth)"""
-    if not url:
-        return None, None, None
-    try:
-        from urllib.parse import urlparse
-        parsed = urlparse(url)
-        username = parsed.username
-        password = parsed.password
-        # 处理某些情况下username包含特殊字符被错误解析的问题
-        if not username and '@' in parsed.netloc:
-             # 手动解析
-             auth_part, host_part = parsed.netloc.split('@', 1)
-             if ':' in auth_part:
-                 username, password = auth_part.split(':', 1)
-             else:
-                 username = auth_part
-             
-             if ':' in host_part:
-                 hostname, port = host_part.split(':', 1)
-                 try:
-                     port = int(port)
-                 except:
-                     port = 80
-             else:
-                 hostname = host_part
-                 port = 80
-             return hostname, port, (username, password)
-        
-        return parsed.hostname, parsed.port, username and password and (username, password)
-    except Exception as e:
-        log(f"代理解析失败: {e}", "ERR")
-        return None, None, None
-
-def check_proxy_ip():
-    """检查当前IP (验证代理是否生效)"""
-    try:
-        log("正在检查当前IP...", "INFO")
-        r = requests.get("https://httpbin.org/ip", proxies=PROXIES if PROXIES else None, timeout=10)
-        if r.status_code == 200:
-            ip = r.json().get("origin")
-            log(f"当前IP: {ip}", "INFO", force=True)
-            if PROXIES:
-                log(f"代理已配置: {PROXIES}", "INFO")
-        else:
-            log(f"IP检查失败: {r.status_code}", "WARN")
-    except Exception as e:
-        log(f"IP检查异常: {e}", "WARN")
+    # log(f"使用HTTPS代理: {HTTPS_PROXY}", "INFO") # log function not yet defined here
 
 # 交易配置
 AUTO_TRADE = os.getenv("AUTO_TRADE", "false").lower() == "true"
 TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "5"))
 
 # 条件配置
-C1_TIME = int(os.getenv("CONDITION_1_TIME", "40"))
-C1_DIFF = float(os.getenv("CONDITION_1_DIFF", "60"))
-C2_TIME = int(os.getenv("CONDITION_2_TIME", "60"))
-C2_DIFF = float(os.getenv("CONDITION_2_DIFF", "80"))
-C3_TIME = int(os.getenv("CONDITION_3_TIME", "120"))
-C3_DIFF = float(os.getenv("CONDITION_3_DIFF", "180"))
+# 条件1: 剩余120秒内,价差≥30,UP概率≥95%
+C1_TIME = int(os.getenv("CONDITION_1_TIME", "120"))
+C1_DIFF = float(os.getenv("CONDITION_1_DIFF", "30"))
+C1_MIN_PROB = float(os.getenv("CONDITION_1_MIN_PROB", "0.95"))
+C1_MAX_PROB = float(os.getenv("CONDITION_1_MAX_PROB", "1.0"))
+
+# 条件2: 剩余120秒内,价差≥30,DOWN概率≤5%
+C2_TIME = int(os.getenv("CONDITION_2_TIME", "120"))
+C2_DIFF = float(os.getenv("CONDITION_2_DIFF", "30"))
+C2_MIN_PROB = float(os.getenv("CONDITION_2_MIN_PROB", "0.0"))
+C2_MAX_PROB = float(os.getenv("CONDITION_2_MAX_PROB", "0.05"))
+
+# 条件3: 剩余60秒内,价差≥50,UP概率≥90%
+C3_TIME = int(os.getenv("CONDITION_3_TIME", "60"))
+C3_DIFF = float(os.getenv("CONDITION_3_DIFF", "50"))
+C3_MIN_PROB = float(os.getenv("CONDITION_3_MIN_PROB", "0.90"))
+C3_MAX_PROB = float(os.getenv("CONDITION_3_MAX_PROB", "1.0"))
+
+# 条件4: 剩余60秒内,价差≥50,DOWN概率≤20%
+C4_TIME = int(os.getenv("CONDITION_4_TIME", "60"))
+C4_DIFF = float(os.getenv("CONDITION_4_DIFF", "50"))
+C4_MIN_PROB = float(os.getenv("CONDITION_4_MIN_PROB", "0.0"))
+C4_MAX_PROB = float(os.getenv("CONDITION_4_MAX_PROB", "0.20"))
+
+# 条件5: 剩余40秒内,价差≥60 (激进，无概率限制)
+C5_TIME = int(os.getenv("CONDITION_5_TIME", "40"))
+C5_DIFF = float(os.getenv("CONDITION_5_DIFF", "60"))
+
+ORDER_TIMEOUT_SEC = int(os.getenv("ORDER_TIMEOUT_SEC", "8"))  # 下单后8秒未成交则撤单
+SLIPPAGE_THRESHOLD = float(os.getenv("SLIPPAGE_THRESHOLD", "0.05"))  # 滑点阈值5%
+MAX_RETRY_PER_MARKET = int(os.getenv("MAX_RETRY_PER_MARKET", "2"))  # 每市场最多尝试2次
 
 # 风控配置
 STOP_LOSS_DIFF = float(os.getenv("STOP_LOSS_DIFF", "40"))
@@ -144,6 +122,8 @@ POLY_BUILDER_PASSPHRASE = os.getenv("POLY_BUILDER_PASSPHRASE", "")
 RELAYER_URL = os.getenv("RELAYER_URL", "https://relayer-v2.polymarket.com")
 RELAYER_TX_TYPE = os.getenv("RELAYER_TX_TYPE", "SAFE").upper()
 DASHBOARD_ACCOUNT_SYNC_SEC = max(10, int(os.getenv("DASHBOARD_ACCOUNT_SYNC_SEC", "20")))
+MARKET_FOUND_LOG_INTERVAL = max(10, int(os.getenv("MARKET_FOUND_LOG_INTERVAL", "30")))
+MARKET_META_REFRESH_SEC = max(2, int(os.getenv("MARKET_META_REFRESH_SEC", "5")))
 
 WEB_ENABLED = os.getenv("WEB_ENABLED", "true").lower() == "true"
 WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
@@ -163,9 +143,12 @@ price_data = {
 }
 
 dashboard_lock = threading.Lock()
+dashboard_cond = threading.Condition(dashboard_lock)
+dashboard_version = 0
 dashboard_state = {
     "updated_at": None,
     "market": {},
+    "wallet_balance": None,
     "prices": {},
     "position": {},
     "pending_order": {},
@@ -184,12 +167,53 @@ dashboard_state = {
 
 app = Flask(__name__, static_folder=STATIC_DIR)
 
+_market_found_log_state = {"slug": "", "kind": "", "last_ts": 0.0}
+_price_refresh_lock = threading.Lock()
+_price_refresh_running = False
+
+
+def _log_market_found_throttled(kind, slug, remaining):
+    same_market = (_market_found_log_state.get("slug") == slug and _market_found_log_state.get("kind") == kind)
+    if same_market:
+        return
+    _market_found_log_state["slug"] = slug
+    _market_found_log_state["kind"] = kind
+    _market_found_log_state["last_ts"] = time.time()
+    log(f"找到{kind}市场: {slug[:40]}... (剩余{remaining//60}分{remaining%60}秒)", "OK")
+
+
+def _trigger_price_refresh():
+    global _price_refresh_running
+    with _price_refresh_lock:
+        if _price_refresh_running:
+            return
+        _price_refresh_running = True
+
+    def worker():
+        global _price_refresh_running
+        try:
+            chainlink_price = get_chainlink_btc_price()
+            if chainlink_price:
+                price_data["btc"] = chainlink_price
+
+            binance_price = get_binance_btc_price()
+            if binance_price:
+                price_data["binance"] = binance_price
+        finally:
+            with _price_refresh_lock:
+                _price_refresh_running = False
+
+    threading.Thread(target=worker, daemon=True).start()
+
 
 def _dashboard_set(**kwargs):
-    with dashboard_lock:
+    global dashboard_version
+    with dashboard_cond:
         for k, v in kwargs.items():
             dashboard_state[k] = v
         dashboard_state["updated_at"] = datetime.now().isoformat()
+        dashboard_version += 1
+        dashboard_cond.notify_all()
 
 
 @app.route("/")
@@ -207,6 +231,50 @@ def dashboard_status():
 def dashboard_logs():
     with dashboard_lock:
         return jsonify({"items": list(dashboard_state.get("activity") or [])[-300:]})
+
+
+@app.route("/api/stream")
+def dashboard_stream():
+    def _event(name, payload):
+        return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    def generate():
+        last_seen = -1
+        last_log_sig = ""
+        while True:
+            with dashboard_cond:
+                if dashboard_version == last_seen:
+                    dashboard_cond.wait(timeout=15)
+                version_now = dashboard_version
+                state_now = dict(dashboard_state)
+
+            if version_now != last_seen:
+                logs = list(state_now.get("activity") or [])[-300:]
+                state_now.pop("activity", None)
+                yield _event("status", {"data": state_now})
+
+                if logs:
+                    tail = logs[-1]
+                    sig = f"{len(logs)}|{tail.get('time','')}|{tail.get('message','')}"
+                else:
+                    sig = "0"
+                if sig != last_log_sig:
+                    yield _event("logs", {"items": logs})
+                    last_log_sig = sig
+
+                last_seen = version_now
+            else:
+                yield ": ping\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.route("/api/history")
@@ -240,7 +308,8 @@ def log(msg, level="INFO", force=False):
         log_msg = f"[{ts}] {icon} {msg}"
         print(log_msg)
 
-        with dashboard_lock:
+        global dashboard_version
+        with dashboard_cond:
             arr = dashboard_state.get("activity") or []
             arr.append({
                 "time": ts,
@@ -251,6 +320,8 @@ def log(msg, level="INFO", force=False):
                 arr = arr[-400:]
             dashboard_state["activity"] = arr
             dashboard_state["updated_at"] = datetime.now().isoformat()
+            dashboard_version += 1
+            dashboard_cond.notify_all()
         
         # 只写入重要日志到文件: TRADE(交易)和ERR(错误)
         if level in ["TRADE", "ERR"]:
@@ -273,7 +344,57 @@ def get_binance_btc_price():
         pass
     return None
 
-
+def get_chainlink_btc_price():
+    """从 Polymarket RTDS WebSocket 获取 Chainlink BTC 价格 (备用)"""
+    result = {"price": None}
+    
+    def on_message(ws, message):
+        try:
+            data = json.loads(message)
+            if data.get("topic") == "crypto_prices" and data.get("payload"):
+                payload = data["payload"]
+                if "data" in payload and payload.get("symbol") == "btc/usd":
+                    prices = payload["data"]
+                    if prices:
+                        result["price"] = prices[-1]["value"]
+                elif "value" in payload:
+                    result["price"] = payload["value"]
+            ws.close()
+        except:
+            pass
+    
+    def on_open(ws):
+        sub_msg = {
+            "action": "subscribe",
+            "subscriptions": [{
+                "topic": "crypto_prices_chainlink",
+                "type": "*",
+                "filters": "{\"symbol\":\"btc/usd\"}"
+            }]
+        }
+        ws.send(json.dumps(sub_msg))
+    
+    def on_error(ws, error):
+        pass
+    
+    try:
+        ws = websocket.WebSocketApp(RTDS_WS,
+            on_open=on_open,
+            on_message=on_message,
+            on_error=on_error)
+        
+        def close_after():
+            time.sleep(3)
+            try:
+                ws.close()
+            except:
+                pass
+        threading.Thread(target=close_after, daemon=True).start()
+        
+        ws.run_forever()
+        return result["price"]
+    except:
+        return None
 
 def get_crypto_price_api(start_time, end_time):
     """
@@ -349,14 +470,14 @@ def get_active_market():
         current_slug = get_current_slug()
         market = fetch_market_by_slug(current_slug)
         if market and market["remaining"] > 0:
-            log(f"找到当前市场: {current_slug[:40]}... (剩余{market['remaining']//60}分{market['remaining']%60}秒)", "OK")
+            _log_market_found_throttled("当前", current_slug, market["remaining"])
             return market
         
         # 如果当前市场已结束或不存在,尝试下一个周期
         next_slug = get_next_slug()
         market = fetch_market_by_slug(next_slug)
         if market and market["remaining"] > 0:
-            log(f"找到下一市场: {next_slug[:40]}... (剩余{market['remaining']//60}分{market['remaining']%60}秒)", "OK")
+            _log_market_found_throttled("下一", next_slug, market["remaining"])
             return market
         
         log("当前和下一周期都没有活跃市场", "WARN")
@@ -388,8 +509,8 @@ def fetch_market_by_slug(slug):
         if not end_str or not start_str:
             return None
         
-        # 计算剩余时间 (使用time.time()以获得更准确的UTC时间戳)
-        now = time.time()
+        # 计算剩余时间
+        now = datetime.now(timezone.utc).timestamp()
         end_ts = datetime.fromisoformat(end_str.replace("Z", "+00:00")).timestamp()
         remaining_time = int(end_ts - now)
         
@@ -777,30 +898,40 @@ def _compute_wallet_unrealized_pnl(rows):
     return float(unrealized)
 
 
-def get_usdc_balance(address):
-    """获取USDC余额"""
-    if not address or not HAS_WEB3 or not POLYGON_RPC_URL:
+def _fetch_wallet_usdc_balance(user):
+    if not HAS_WEB3:
+        return None
+    rpc_url = (POLYGON_RPC_URL or "").strip()
+    if not rpc_url or not user:
         return None
     try:
-        request_kwargs = {}
-        if PROXIES:
-             request_kwargs = {"proxies": PROXIES}
-        
-        w3 = Web3(Web3.HTTPProvider(POLYGON_RPC_URL, request_kwargs=request_kwargs))
+        w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 8}))
         if not w3.is_connected():
             return None
-        
-        # 简单ABI
-        abi = [{
-            "constant": True,
-            "inputs": [{"name": "_owner", "type": "address"}],
-            "name": "balanceOf",
-            "outputs": [{"name": "balance", "type": "uint256"}],
-            "type": "function"
-        }]
-        contract = w3.eth.contract(address=Web3.to_checksum_address(USDC_E_CONTRACT), abi=abi)
-        balance_wei = contract.functions.balanceOf(Web3.to_checksum_address(address)).call()
-        return float(balance_wei) / 1e6
+        usdc_addr = Web3.to_checksum_address(USDC_E_CONTRACT)
+        user_addr = Web3.to_checksum_address(user)
+        contract = w3.eth.contract(
+            address=usdc_addr,
+            abi=[
+                {
+                    "name": "balanceOf",
+                    "type": "function",
+                    "stateMutability": "view",
+                    "inputs": [{"name": "account", "type": "address"}],
+                    "outputs": [{"name": "", "type": "uint256"}],
+                },
+                {
+                    "name": "decimals",
+                    "type": "function",
+                    "stateMutability": "view",
+                    "inputs": [],
+                    "outputs": [{"name": "", "type": "uint8"}],
+                },
+            ],
+        )
+        raw = contract.functions.balanceOf(user_addr).call()
+        decimals = contract.functions.decimals().call()
+        return float(raw) / (10 ** int(decimals))
     except Exception:
         return None
 
@@ -816,8 +947,9 @@ def _sync_dashboard_account_snapshot(user):
     agg_trades = _build_market_aggregated_trades(raw_activity)
     realized_pnl = _compute_wallet_realized_pnl(wallet_closed)
     unrealized_pnl = _compute_wallet_unrealized_pnl(wallet_positions)
-    balance = get_usdc_balance(u)
+    wallet_balance = _fetch_wallet_usdc_balance(u)
     _dashboard_set(
+        wallet_balance=wallet_balance,
         wallet_positions=list(wallet_positions)[:120],
         wallet_history=list(wallet_history)[:200],
         live_trades=list(agg_trades)[-300:],
@@ -825,7 +957,6 @@ def _sync_dashboard_account_snapshot(user):
         live_realized_pnl=float(realized_pnl),
         live_unrealized_pnl=float(unrealized_pnl),
         live_total_pnl=float(realized_pnl + unrealized_pnl),
-        wallet_balance=balance,
     )
     return True
 
@@ -949,11 +1080,11 @@ class BTCPriceListener:
             pass
     
     def on_error(self, ws, error):
-        log(f"BTC WS Error: {error}", "ERR")
+        pass
     
-    def on_close(self, ws, close_status_code, close_msg):
+    def on_close(self, ws, *args):
         if self.running:
-            log(f"BTC价格连接断开 ({close_status_code}: {close_msg}), 5秒后重连...", "WARN")
+            log("BTC价格连接断开,5秒后重连...", "WARN")
             time.sleep(5)
             self.start()
     
@@ -969,134 +1100,8 @@ class BTCPriceListener:
             on_error=self.on_error,
             on_close=self.on_close
         )
-        proxy_host, proxy_port, proxy_auth = parse_proxy_url(HTTP_PROXY or HTTPS_PROXY)
-        log(f"BTC WS 代理参数: host={proxy_host} port={proxy_port} auth={'***' if proxy_auth else 'None'}", "INFO")
-        threading.Thread(target=self.ws.run_forever, kwargs={
-            "http_proxy_host": proxy_host, 
-            "http_proxy_port": proxy_port, 
-            "http_proxy_auth": proxy_auth,
-            "proxy_type": "http"
-        }, daemon=True).start()
+        threading.Thread(target=self.ws.run_forever, daemon=True).start()
     
-    def stop(self):
-        self.running = False
-        if self.ws:
-            self.ws.close()
-
-class ChainlinkPriceListener:
-    """监听Chainlink BTC价格 (WebSocket)"""
-    def __init__(self):
-        self.ws = None
-        self.running = False
-
-    def on_message(self, ws, message):
-        try:
-            data = json.loads(message)
-            if "data" in data and "value" in data["data"]:
-                # Chainlink价格通常是带小数点的字符串，需要转换为float
-                price_data["btc"] = float(data["data"]["value"]) / 1e8 # Chainlink价格通常是8位小数
-                price_data["last_update"] = time.time()
-        except:
-            pass
-
-    def on_error(self, ws, error):
-        log(f"Chainlink WS Error: {error}", "ERR")
-
-    def on_close(self, ws, close_status_code, close_msg):
-        if self.running:
-            log(f"Chainlink价格连接断开 ({close_status_code}: {close_msg}), 5秒后重连...", "WARN")
-            time.sleep(5)
-            self.start()
-
-    def on_open(self, ws):
-        log("Chainlink价格WebSocket已连接", "OK")
-
-    def start(self):
-        self.running = True
-        self.ws = websocket.WebSocketApp(
-            CHAINLINK_WSS,
-            on_open=self.on_open,
-            on_message=self.on_message,
-            on_error=self.on_error,
-            on_close=self.on_close
-        )
-        proxy_host, proxy_port, proxy_auth = parse_proxy_url(HTTP_PROXY or HTTPS_PROXY)
-        log(f"Chainlink WS 代理参数: host={proxy_host} port={proxy_port} auth={'***' if proxy_auth else 'None'}", "INFO")
-        threading.Thread(target=self.ws.run_forever, kwargs={
-            "http_proxy_host": proxy_host,
-            "http_proxy_port": proxy_port,
-            "http_proxy_auth": proxy_auth,
-            "proxy_type": "http"
-        }, daemon=True).start()
-
-    def stop(self):
-        self.running = False
-        if self.ws:
-            self.ws.close()
-
-class ChainlinkPriceListener:
-    """监听Chainlink BTC价格 (WebSocket) - 持久连接"""
-    def __init__(self):
-        self.ws = None
-        self.running = False
-    
-    def on_message(self, ws, message):
-        try:
-            data = json.loads(message)
-            if data.get("topic") == "crypto_prices" and data.get("payload"):
-                payload = data["payload"]
-                if "data" in payload and payload.get("symbol") == "btc/usd":
-                    prices = payload["data"]
-                    if prices:
-                        price = float(prices[-1]["value"])
-                        price_data["btc"] = price
-                        price_data["last_update"] = time.time()
-                elif "value" in payload:
-                    price = float(payload["value"])
-                    price_data["btc"] = price
-                    price_data["last_update"] = time.time()
-        except:
-            pass
-
-    def on_error(self, ws, error):
-        log(f"Chainlink WS Error: {error}", "ERR")
-    
-    def on_close(self, ws, close_status_code, close_msg):
-        if self.running:
-            log(f"Chainlink连接断开 ({close_status_code}: {close_msg}), 5秒后重连...", "WARN")
-            time.sleep(5)
-            self.start()
-
-    def on_open(self, ws):
-        sub_msg = {
-            "action": "subscribe",
-            "subscriptions": [{
-                "topic": "crypto_prices_chainlink",
-                "type": "*",
-                "filters": "{\"symbol\":\"btc/usd\"}"
-            }]
-        }
-        ws.send(json.dumps(sub_msg))
-        log("Chainlink WebSocket已连接", "OK")
-
-    def start(self):
-        self.running = True
-        self.ws = websocket.WebSocketApp(
-            RTDS_WS,
-            on_open=self.on_open,
-            on_message=self.on_message,
-            on_error=self.on_error,
-            on_close=self.on_close
-        )
-        proxy_host, proxy_port, proxy_auth = parse_proxy_url(HTTP_PROXY or HTTPS_PROXY)
-        log(f"Chainlink WS 代理参数: host={proxy_host} port={proxy_port} auth={'***' if proxy_auth else 'None'}", "INFO")
-        threading.Thread(target=self.ws.run_forever, kwargs={
-            "http_proxy_host": proxy_host, 
-            "http_proxy_port": proxy_port, 
-            "http_proxy_auth": proxy_auth,
-            "proxy_type": "http"
-        }, daemon=True).start()
-
     def stop(self):
         self.running = False
         if self.ws:
@@ -1136,12 +1141,8 @@ class MarketPriceListener:
                         
                         if asset_id == self.up_token:
                             price_data["up_price"] = mid_price
-                            price_data["up_best_bid"] = best_bid
-                            price_data["up_best_ask"] = best_ask
                         elif asset_id == self.down_token:
                             price_data["down_price"] = mid_price
-                            price_data["down_best_bid"] = best_bid
-                            price_data["down_best_ask"] = best_ask
                 
                 # 处理价格变化数据
                 elif event_type == "price_change":
@@ -1156,21 +1157,17 @@ class MarketPriceListener:
                             
                             if asset_id == self.up_token:
                                 price_data["up_price"] = mid_price
-                                price_data["up_best_bid"] = best_bid
-                                price_data["up_best_ask"] = best_ask
                             elif asset_id == self.down_token:
                                 price_data["down_price"] = mid_price
-                                price_data["down_best_bid"] = best_bid
-                                price_data["down_best_ask"] = best_ask
         except:
             pass
     
     def on_error(self, ws, error):
-        log(f"Market WS Error: {error}", "ERR")
+        pass
     
-    def on_close(self, ws, close_status_code, close_msg):
+    def on_close(self, ws, *args):
         if self.running:
-            log(f"市场价格连接断开 ({close_status_code}: {close_msg}), 5秒后重连...", "WARN")
+            log("市场价格连接断开,5秒后重连...", "WARN")
             time.sleep(5)
             self.start()
     
@@ -1191,14 +1188,7 @@ class MarketPriceListener:
             on_error=self.on_error,
             on_close=self.on_close
         )
-        proxy_host, proxy_port, proxy_auth = parse_proxy_url(HTTP_PROXY or HTTPS_PROXY)
-        log(f"Market WS 代理参数: host={proxy_host} port={proxy_port} auth={'***' if proxy_auth else 'None'}", "INFO")
-        threading.Thread(target=self.ws.run_forever, kwargs={
-            "http_proxy_host": proxy_host, 
-            "http_proxy_port": proxy_port, 
-            "http_proxy_auth": proxy_auth,
-            "proxy_type": "http"
-        }, daemon=True).start()
+        threading.Thread(target=self.ws.run_forever, daemon=True).start()
     
     def stop(self):
         self.running = False
@@ -1482,13 +1472,9 @@ class AutoRedeemer:
         try:
             from py_builder_relayer_client.models import SafeTransaction, OperationType
 
-            request_kwargs = {}
-            if PROXIES:
-                request_kwargs = {"proxies": PROXIES}
-            
             ctf_addr = Web3.to_checksum_address(CTF_CONTRACT)
             usdc_addr = Web3.to_checksum_address(USDC_E_CONTRACT)
-            contract = Web3(Web3.HTTPProvider(POLYGON_RPC_URL, request_kwargs=request_kwargs)).eth.contract(
+            contract = Web3().eth.contract(
                 address=ctf_addr,
                 abi=[{
                     "name": "redeemPositions",
@@ -1661,13 +1647,16 @@ def main():
     print(f"  自动下单: {'开启' if AUTO_TRADE else '关闭'}")
     print(f"  自动领取: {'开启' if AUTO_REDEEM else '关闭'}")
     print(f"  下单金额: ${TRADE_AMOUNT}")
-    print(f"  条件1: 剩余≤{C1_TIME}秒 且 价差≥${C1_DIFF}")
-    print(f"  条件2: 剩余≤{C2_TIME}秒 且 价差≥${C2_DIFF}")
-    print(f"  条件3: 剩余≤{C3_TIME}秒 且 价差≥${C3_DIFF}")
+    print(f"  条件1: 剩余≤{C1_TIME}秒 且 价差≥${C1_DIFF} (UP概率{C1_MIN_PROB*100:.0f}-{C1_MAX_PROB*100:.0f}%)")
+    print(f"  条件2: 剩余≤{C2_TIME}秒 且 价差≥${C2_DIFF} (DOWN概率{C2_MIN_PROB*100:.0f}-{C2_MAX_PROB*100:.0f}%)")
+    print(f"  条件3: 剩余≤{C3_TIME}秒 且 价差≥${C3_DIFF} (UP概率{C3_MIN_PROB*100:.0f}-{C3_MAX_PROB*100:.0f}%)")
+    print(f"  条件4: 剩余≤{C4_TIME}秒 且 价差≥${C4_DIFF} (DOWN概率{C4_MIN_PROB*100:.0f}-{C4_MAX_PROB*100:.0f}%)")
+    print(f"  条件5: 剩余≤{C5_TIME}秒 且 价差≥${C5_DIFF} (激进)")
+    print(f"  撤单超时: {ORDER_TIMEOUT_SEC}秒")
+    print(f"  滑点阈值: {SLIPPAGE_THRESHOLD*100:.0f}%")
+    print(f"  每市场最多尝试: {MAX_RETRY_PER_MARKET}次")
     print(f"  止损线: 价差<${STOP_LOSS_DIFF}")
     print("="*60 + "\n")
-    
-    check_proxy_ip()
     
     trader = Trader()
     redeemer = AutoRedeemer(os.getenv("PRIVATE_KEY"), os.getenv("FUNDER_ADDRESS"))
@@ -1683,6 +1672,7 @@ def main():
         pending_order=dict(init_state.get("pending_order") or {}),
         last_order=dict(init_state.get("last_order") or {}),
         trade_history=list(init_state.get("trade_history") or []),
+        wallet_balance=None,
         wallet_positions=[],
         wallet_history=[],
         live_trades=[],
@@ -1692,15 +1682,7 @@ def main():
         live_total_pnl=0.0,
     )
     
-
-
     log("启动价格监听...", "INFO", force=True)
-    
-    btc_listener = BTCPriceListener()
-    btc_listener.start()
-    
-    chainlink_listener = ChainlinkPriceListener()
-    chainlink_listener.start()
     
     last_slug = None
     market_listener = None
@@ -1709,8 +1691,6 @@ def main():
     last_account_sync = 0.0
     last_market_fetch = 0.0
     market_data_cache = None
-    last_binance_fetch = 0.0
-    
     dashboard_user = (os.getenv("FUNDER_ADDRESS", "") or "").strip().lower()
     if not dashboard_user:
         dashboard_user = (os.getenv("PRIVATE_KEY_ADDRESS", "") or "").strip().lower()
@@ -1719,37 +1699,31 @@ def main():
     
     try:
         while True:
-            # 每0.1秒循环一次
             now = time.time()
-            
-            # 定期更新市场元数据 (每5秒或没有缓存时)
-            if not market_data_cache or now - last_market_fetch >= 5:
+
+            # 异步更新参考价格，避免阻塞主循环（保证剩余时间1秒级刷新）
+            if now - last_chainlink_update > 5:
+                _trigger_price_refresh()
+                last_chainlink_update = now
+
+            # 市场元数据低频拉取，剩余时间使用本地每秒递减
+            if (not market_data_cache) or (now - last_market_fetch >= MARKET_META_REFRESH_SEC):
                 market_data_cache = get_active_market()
                 last_market_fetch = now
-                if not market_data_cache:
-                    # 如果没有活跃市场，可以稍微sleep多一点避免死循环频繁请求吗？
-                    # 但是get_active_market本身是阻塞的，所以这里还好。
-                    pass
 
             market = None
             if market_data_cache:
-                 # 本地更新剩余时间
-                 end_ts = datetime.fromisoformat(market_data_cache["end"].replace("Z", "+00:00")).timestamp()
-                 remaining = int(end_ts - now)
-                 if remaining <= 0:
-                     # 市场已结束，立即强制刷新
-                     last_market_fetch = 0
-                     market_data_cache = None
-                 else:
-                     market = market_data_cache.copy()
-                     market["remaining"] = remaining
-            
-            # 获取币安价格(仅参考), 每2秒更新一次, 避免阻塞
-            if now - last_binance_fetch > 2:
-                binance_price = get_binance_btc_price()
-                if binance_price:
-                    price_data["binance"] = binance_price
-                last_binance_fetch = now
+                try:
+                    end_ts = datetime.fromisoformat(str(market_data_cache.get("end", "")).replace("Z", "+00:00")).timestamp()
+                    remaining_live = int(end_ts - now)
+                except Exception:
+                    remaining_live = 0
+                if remaining_live <= 0:
+                    market_data_cache = None
+                    last_market_fetch = 0.0
+                else:
+                    market = dict(market_data_cache)
+                    market["remaining"] = remaining_live
 
             if now - last_account_sync >= DASHBOARD_ACCOUNT_SYNC_SEC:
                 _sync_dashboard_account_snapshot(dashboard_user)
@@ -1777,11 +1751,7 @@ def main():
                     print("\n⏳ 等待活跃市场...")
                     if price_data["btc"]:
                         print(f"当前BTC价格(Chainlink): ${price_data['btc']:,.2f}")
-                if first_display:
-                    print("\n⏳ 等待活跃市场...")
-                    if price_data["btc"]:
-                        print(f"当前BTC价格(Chainlink): ${price_data['btc']:,.2f}")
-                time.sleep(0.5)
+                time.sleep(1)
                 continue
             
             slug = market["slug"]
@@ -1825,6 +1795,10 @@ def main():
                 crypto_data = get_crypto_price_api(market["start"], market["end"])
                 if crypto_data.get("openPrice"):
                     price_data["ptb"] = crypto_data["openPrice"]
+                # 如果当前周期 PTB 获取失败，尝试使用前一周期的 closePrice
+                elif crypto_data.get("closePrice"):
+                    price_data["ptb"] = crypto_data["closePrice"]
+                    log(f"使用前一周期的closePrice作为PTB: {price_data['ptb']}", "INFO")
             
             # 从WebSocket获取的实时数据
             btc = price_data["btc"] or 0  # 如果Chainlink获取失败,使用0
@@ -1894,14 +1868,12 @@ def main():
                 print("="*90)
                 first_display = False
             
-            # 后续只更新状态行 (每0.5秒刷新一次print以避免闪烁，但dashboard状态是实时的)
+            # 后续只更新状态行
             ptb_str = f"${ptb:,.0f}" if ptb > 0 else "获取中"
             btc_str = f"${btc:,.0f}" if btc > 0 else "获取中"
             binance = price_data.get("binance") or 0
             binance_str = f"${binance:,.0f}" if binance > 0 else "N/A"
             diff_str = f"{diff:+.0f}" if (btc > 0 and ptb > 0) else "N/A"
-            
-            # 使用\r覆盖当前行
             status = f"[{datetime.now().strftime('%H:%M:%S')}] 剩余:{remaining//60:02d}分{remaining%60:02d}秒 | Chainlink:{btc_str} | 币安:{binance_str} | PTB:{ptb_str} | 价差:{diff_str} | UP:{up_price*100:.1f}% DOWN:{down_price*100:.1f}%"
             print(f"\r{status}" + " "*10, end="", flush=True)
             
@@ -1909,29 +1881,59 @@ def main():
             triggered = False
             condition = None
             side = None
+            desired_side = None
             price = None
             token = None
             
-            if remaining <= C1_TIME and diff_abs >= C1_DIFF:
+            # 条件1: 剩余120秒内,价差为正且≥30,UP概率高
+            if remaining <= C1_TIME and diff >= C1_DIFF:
+                prob = up_price
+                if C1_MIN_PROB <= prob <= C1_MAX_PROB:
+                    triggered = True
+                    desired_side = "UP"
+                    condition = f"条件1: 剩余≤{C1_TIME}s 且 价差≥${C1_DIFF} (UP概率{prob*100:.0f}%)"
+                else:
+                    log(f"条件1跳过: UP概率{prob*100:.1f}% < {C1_MIN_PROB*100:.0f}%", "INFO")
+            
+            # 条件2: 剩余120秒内,价差为负且≤-阈值,DOWN概率高
+            elif remaining <= C2_TIME and diff <= -C2_DIFF:
+                prob = down_price
+                if C2_MIN_PROB <= prob <= C2_MAX_PROB:
+                    triggered = True
+                    desired_side = "DOWN"
+                    condition = f"条件2: 剩余≤{C2_TIME}s 且 价差≤-${C2_DIFF} (DOWN概率{prob*100:.0f}%)"
+                else:
+                    log(f"条件2跳过: DOWN概率{prob*100:.1f}% 不在 {C2_MIN_PROB*100:.0f}%~{C2_MAX_PROB*100:.0f}%", "INFO")
+            
+            # 条件3: 剩余60秒内,价差为正且≥50,UP概率高
+            elif remaining <= C3_TIME and diff >= C3_DIFF:
+                prob = up_price
+                if C3_MIN_PROB <= prob <= C3_MAX_PROB:
+                    triggered = True
+                    desired_side = "UP"
+                    condition = f"条件3: 剩余≤{C3_TIME}s 且 价差≥${C3_DIFF} (UP概率{prob*100:.0f}%)"
+                else:
+                    log(f"条件3跳过: UP概率{prob*100:.1f}% < {C3_MIN_PROB*100:.0f}%", "INFO")
+            
+            # 条件4: 剩余60秒内,价差为负且≤-阈值,DOWN概率高
+            elif remaining <= C4_TIME and diff <= -C4_DIFF:
+                prob = down_price
+                if C4_MIN_PROB <= prob <= C4_MAX_PROB:
+                    triggered = True
+                    desired_side = "DOWN"
+                    condition = f"条件4: 剩余≤{C4_TIME}s 且 价差≤-${C4_DIFF} (DOWN概率{prob*100:.0f}%)"
+                else:
+                    log(f"条件4跳过: DOWN概率{prob*100:.1f}% 不在 {C4_MIN_PROB*100:.0f}%~{C4_MAX_PROB*100:.0f}%", "INFO")
+            
+            # 条件5: 剩余40秒内,价差≥60 (激进，无概率限制)
+            elif remaining <= C5_TIME and diff_abs >= C5_DIFF:
                 triggered = True
-                condition = f"条件1: 剩余≤{C1_TIME}s 且 价差≥${C1_DIFF}"
-            elif remaining <= C2_TIME and diff_abs >= C2_DIFF:
-                triggered = True
-                condition = f"条件2: 剩余≤{C2_TIME}s 且 价差≥${C2_DIFF}"
-            elif remaining <= C3_TIME and diff_abs >= C3_DIFF:
-                triggered = True
-                condition = f"条件3: 剩余≤{C3_TIME}s 且 价差≥${C3_DIFF}"
+                condition = f"条件5: 剩余≤{C5_TIME}s 且 价差≥${C5_DIFF} (激进)"
             
             if triggered:
-                side = "UP" if diff > 0 else "DOWN"
-                # 使用 best_ask 价格下单 (taker order, 立即成交)
-                # 如果没有 best_ask 数据，回退到 mid_price
-                if side == "UP":
-                    price = price_data.get("up_best_ask") or up_price
-                else:
-                    price = price_data.get("down_best_ask") or down_price
+                side = desired_side or ("UP" if diff > 0 else "DOWN")
+                price = up_price if side == "UP" else down_price
                 token = market["up_token"] if side == "UP" else market["down_token"]
-                log(f"下单价格: best_ask={price:.4f} (mid={up_price if side=='UP' else down_price:.4f})", "TRADE")
                 
                 # 检查是否已下单
                 state = load_state()
@@ -1949,10 +1951,10 @@ def main():
                     order_id = pending_order.get("order_id")
                     order_time = pending_order.get("time")
                     
-                    # 检查订单是否超过10秒
+                    # 检查订单是否超时（使用条件4的超时设置）
                     if order_time:
                         elapsed = (datetime.now() - datetime.fromisoformat(order_time)).total_seconds()
-                        if elapsed > 10:
+                        if elapsed > ORDER_TIMEOUT_SEC:
                             # 检查订单状态
                             order_status = trader.get_order_status(order_id)
                             if order_status and not order_status.get("filled"):
@@ -2001,8 +2003,27 @@ def main():
                                 _sync_dashboard_account_snapshot(dashboard_user)
                 
                 # 如果没有pending订单且未记录过此订单,则下单
-                if not pending_order and last_order.get("key") != order_key:
-                    log(f"触发条件: {condition} → {side} @ {price*100:.1f}%", "TRADE")
+                has_position = bool(state.get("position"))
+                if not pending_order and (not has_position) and last_order.get("key") != order_key:
+                    # 检查滑点：当前价格与下单价格差异
+                    current_price = up_price if side == "UP" else down_price
+                    if price > 0:
+                        slippage = abs(current_price - price) / price
+                        if slippage > SLIPPAGE_THRESHOLD:
+                            log(f"滑点过大: {slippage*100:.1f}% > {SLIPPAGE_THRESHOLD*100:.0f}%, 取消下单", "WARN")
+                            triggered = False
+                            condition = None
+                    
+                    # 检查尝试次数：同一市场避免多次追单
+                    if triggered:
+                        retry_count = last_order.get("retry_count", 0)
+                        if retry_count >= MAX_RETRY_PER_MARKET:
+                            log(f"尝试次数已达上限({MAX_RETRY_PER_MARKET}次), 跳过 {order_key}", "WARN")
+                            triggered = False
+                            condition = None
+                    
+                    if triggered:
+                        log(f"触发条件: {condition} → {side} @ {price*100:.1f}%", "TRADE")
                     
                     if AUTO_TRADE and trader.connected:
                         order_id = trader.place_order(token, "BUY", price, TRADE_AMOUNT)
@@ -2016,7 +2037,13 @@ def main():
                                 "side": side,
                                 "price": price
                             }
-                            state["last_order"] = {"key": order_key, "time": datetime.now().isoformat()}
+                            # 记录尝试次数
+                            current_retry = last_order.get("retry_count", 0)
+                            state["last_order"] = {
+                                "key": order_key, 
+                                "time": datetime.now().isoformat(),
+                                "retry_count": current_retry + 1
+                            }
                             state = _append_trade_history(state, {
                                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 "slug": slug,
@@ -2074,13 +2101,8 @@ def main():
                     
                     if AUTO_TRADE and trader.connected:
                         pos_side = pos.get("side")
-                        # 止损卖出使用 best_bid (买一价) 以确保立即成交
-                        if pos_side == "UP":
-                            sell_price = price_data.get("up_best_bid") or up_price
-                        else:
-                            sell_price = price_data.get("down_best_bid") or down_price
+                        sell_price = up_price if pos_side == "UP" else down_price
                         sell_token = market["up_token"] if pos_side == "UP" else market["down_token"]
-                        log(f"止损卖出价格: best_bid={sell_price:.4f}", "TRADE")
                         sell_order_id = trader.place_order(sell_token, "SELL", sell_price, TRADE_AMOUNT)
                         state = _append_trade_history(state, {
                             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2100,7 +2122,7 @@ def main():
                         _sync_dashboard_account_snapshot(dashboard_user)
                         log(f"止损卖出完成: {pos_side} @ {sell_price*100:.2f}%", "TRADE")
             
-            time.sleep(0.1)  # 缩短循环间隔到0.1秒
+            time.sleep(1)  # 每1秒刷新一次
             
     except KeyboardInterrupt:
         print("\n\n退出监控")
