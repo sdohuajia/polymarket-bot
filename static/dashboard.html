@@ -13,12 +13,15 @@
     .title { font-size:22px; font-weight:700; }
     .sub,.muted { color:var(--muted); font-size:12px; }
     .badge { border:1px solid var(--line); border-radius:999px; padding:6px 10px; background:#fff; font-size:12px; }
-    .grid { display:grid; grid-template-columns:1.55fr 1fr; gap:14px; }
+    .grid { display:grid; grid-template-columns:minmax(0,1.7fr) minmax(300px,0.95fr); gap:14px; }
+    .grid > * { min-width:0; }
     .left { display:grid; gap:14px; }
     .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; }
     .card h3 { margin:0 0 10px; font-size:14px; }
-    .kv { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
-    .kv2 { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+    .kv { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,260px)); gap:10px; justify-content:start; }
+    .kv-tight { grid-template-columns:repeat(auto-fit,minmax(220px,260px)); justify-content:start; }
+    .kv-price { grid-template-columns:repeat(3,minmax(220px,260px)); }
+    .kv2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,260px)); gap:10px; justify-content:start; }
     .item { border:1px solid var(--line); border-radius:10px; padding:10px; min-height:66px; }
     .k { color:var(--muted); font-size:12px; margin-bottom:6px; }
     .v { font-weight:700; font-size:18px; word-break:break-all; }
@@ -32,8 +35,8 @@
     .history-item:last-child { border-bottom:none; }
     .history-main { font-size:13px; font-weight:600; }
     .history-sub { margin-top:2px; color:var(--muted); font-size:12px; }
-    @media (max-width:1080px){ .grid{grid-template-columns:1fr;} .logs{height:360px;min-height:300px;} }
-    @media (max-width:760px){ .kv{grid-template-columns:1fr 1fr;} .kv2{grid-template-columns:1fr;} .v{font-size:16px;} }
+    @media (max-width:1080px){ .grid{grid-template-columns:1fr;} .logs{height:360px;min-height:300px;} .kv,.kv-tight,.kv2,.kv-price{grid-template-columns:1fr 1fr; justify-content:stretch;} }
+    @media (max-width:760px){ .kv,.kv-tight,.kv2,.kv-price{grid-template-columns:1fr;} .v{font-size:16px;} }
   </style>
 </head>
 <body>
@@ -51,7 +54,7 @@
       <div class="left">
         <section class="card">
           <h3>市场状态</h3>
-          <div class="kv">
+          <div class="kv kv-tight">
             <div class="item"><div class="k">剩余时间</div><div id="remainingText" class="v">-</div></div>
             <div class="item"><div class="k">市场状态</div><div id="marketStatus" class="v">-</div></div>
             <div class="item"><div class="k">更新时间戳</div><div id="priceUpdatedTs" class="v mono">-</div></div>
@@ -60,7 +63,7 @@
 
         <section class="card">
           <h3>价格与差值</h3>
-          <div class="kv">
+          <div class="kv kv-tight kv-price">
             <div class="item"><div class="k">PTB</div><div id="ptb" class="v">-</div></div>
             <div class="item"><div class="k">Chainlink BTC</div><div id="chainlink" class="v">-</div></div>
             <div class="item"><div class="k">Binance BTC</div><div id="binance" class="v">-</div></div>
@@ -102,7 +105,7 @@
         </section>
       </div>
 
-      <section class="card">
+      <section class="card" style="min-width:300px;">
         <h3>实时日志</h3>
         <div id="logs" class="logs"></div>
       </section>
@@ -112,6 +115,19 @@
   <script>
     const $ = (id) => document.getElementById(id);
     let logSig = "";
+    let historySig = "";
+    let remainingEndsAtMs = null;
+
+    function fmtRemainingSec(sec) {
+      const s = Math.max(0, Number(sec) || 0);
+      return `${Math.floor(s / 60)}分${s % 60}秒`;
+    }
+
+    setInterval(() => {
+      if (remainingEndsAtMs === null) return;
+      const sec = Math.max(0, Math.floor((remainingEndsAtMs - Date.now()) / 1000));
+      $("remainingText").textContent = fmtRemainingSec(sec);
+    }, 1000);
 
     function fmt(n, d = 2) {
       if (n === null || n === undefined || Number.isNaN(Number(n))) return "-";
@@ -162,6 +178,36 @@
       return `${v.key || "-"} | ${v.time || "-"}`;
     }
 
+    function toDateAny(v) {
+      if (v === null || v === undefined || v === "") return null;
+      if (typeof v === "number" || (typeof v === "string" && /^-?\d+(\.\d+)?$/.test(v.trim()))) {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return null;
+        const ms = Math.abs(n) > 1e12 ? n : n * 1000;
+        const d = new Date(ms);
+        return Number.isFinite(d.getTime()) ? d : null;
+      }
+      const d = new Date(String(v));
+      return Number.isFinite(d.getTime()) ? d : null;
+    }
+
+    function fmtBeijingTime(v) {
+      const d = toDateAny(v);
+      if (!d) return "-";
+      const parts = new Intl.DateTimeFormat("zh-CN", {
+        timeZone: "Asia/Shanghai",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      }).formatToParts(d);
+      const pick = (name) => (parts.find((p) => p.type === name) || {}).value || "";
+      return `${pick("year")}-${pick("month")}-${pick("day")} ${pick("hour")}:${pick("minute")}:${pick("second")}`;
+    }
+
     function setDiff(v) {
       const el = $("diff");
       if (v === null || v === undefined || Number.isNaN(Number(v))) {
@@ -184,7 +230,14 @@
       const bal = data.wallet_balance;
       $("walletBalance").textContent = bal !== undefined && bal !== null ? `余额: $${Number(bal).toLocaleString("zh-CN", {minimumFractionDigits: 2, maximumFractionDigits: 2})}` : "余额: -";
       $("marketSlug").textContent = `市场: ${market.slug || "-"}`;
-      $("remainingText").textContent = market.remaining_text || "-";
+      const rem = maybeNum(market.remaining);
+      if (rem !== null && rem >= 0 && (market.status || "") === "active") {
+        remainingEndsAtMs = Date.now() + Math.round(rem * 1000);
+        $("remainingText").textContent = fmtRemainingSec(Math.floor(rem));
+      } else {
+        remainingEndsAtMs = null;
+        $("remainingText").textContent = market.remaining_text || "-";
+      }
       $("marketStatus").textContent = market.status || "-";
       $("priceUpdatedTs").textContent = prices.updated_ts ? String(prices.updated_ts) : "-";
 
@@ -224,7 +277,20 @@
       const liveTrades = Array.isArray(data.live_trades) ? data.live_trades : [];
       const localHistory = Array.isArray(data.trade_history) ? data.trade_history : [];
       const walletHistory = Array.isArray(data.wallet_history) ? data.wallet_history : [];
-      renderHistory(liveTrades.length ? liveTrades : (localHistory.length ? localHistory : walletHistory));
+      const historyRows = liveTrades.length ? liveTrades : (localHistory.length ? localHistory : walletHistory);
+      if (!historyRows.length) {
+        if (historySig !== "0") {
+          renderHistory([]);
+          historySig = "0";
+        }
+      } else {
+        const tail = historyRows[historyRows.length - 1] || {};
+        const sig = `${historyRows.length}|${tail.id || tail.time || tail.settle_time || tail.order_id || ""}|${tail.status || ""}|${tail.profit ?? tail.price ?? ""}`;
+        if (sig !== historySig) {
+          renderHistory(historyRows);
+          historySig = sig;
+        }
+      }
     }
 
     function renderHistory(items) {
@@ -247,11 +313,12 @@
           const xc = maybeNum(x.sell_count);
           const rc = maybeNum(x.redeem_count);
           const t = x.settle_time || x.order_time || "-";
+          const bjt = fmtBeijingTime(t);
           const cls = p === null ? "" : (p >= 0 ? "up" : "down");
           return `
             <div class="history-item">
               <div class="history-main">${t} | ${d} | <span class="${cls}">${pText}</span></div>
-              <div class="history-sub">${rs} | 买${ec ?? 0} 卖${xc ?? 0} 领${rc ?? 0} | 份额 ${size === null ? "-" : size.toFixed(4)}</div>
+              <div class="history-sub">${rs}${bjt !== "-" ? ` | 北京时间 ${bjt}` : ""} | 买${ec ?? 0} 卖${xc ?? 0} 领${rc ?? 0} | 份额 ${size === null ? "-" : size.toFixed(4)}</div>
             </div>`;
         }
         const t = x.time || "-";
@@ -300,6 +367,28 @@
         const j = await r.json();
         renderLogs((j && j.items) || []);
       } catch (_) {}
+    }
+
+    function startLiveStream() {
+      if (!("EventSource" in window)) return false;
+      try {
+        const es = new EventSource("/api/stream");
+        es.addEventListener("status", (ev) => {
+          try {
+            const j = JSON.parse(ev.data || "{}");
+            renderStatus((j && j.data) || {});
+          } catch (_) {}
+        });
+        es.addEventListener("logs", (ev) => {
+          try {
+            const j = JSON.parse(ev.data || "{}");
+            renderLogs((j && j.items) || []);
+          } catch (_) {}
+        });
+        return true;
+      } catch (_) {
+        return false;
+      }
     }
 
     pollStatus();
