@@ -74,40 +74,43 @@ AUTO_TRADE = os.getenv("AUTO_TRADE", "false").lower() == "true"
 TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "5"))
 
 # 条件配置
-# 条件1: 剩余120秒内,价差≥30,UP概率≥95%
+# 条件1: 剩余120秒内,价差≥30,UP概率80%-92%
 C1_TIME = int(os.getenv("CONDITION_1_TIME", "120"))
 C1_DIFF = float(os.getenv("CONDITION_1_DIFF", "30"))
-C1_MIN_PROB = float(os.getenv("CONDITION_1_MIN_PROB", "0.95"))
-C1_MAX_PROB = float(os.getenv("CONDITION_1_MAX_PROB", "1.0"))
+C1_MIN_PROB = float(os.getenv("CONDITION_1_MIN_PROB", "0.80"))
+C1_MAX_PROB = float(os.getenv("CONDITION_1_MAX_PROB", "0.92"))
 
-# 条件2: 剩余120秒内,价差≥30,DOWN概率≤5%
+# 条件2: 剩余120秒内,价差≥30,DOWN概率80%-92%
 C2_TIME = int(os.getenv("CONDITION_2_TIME", "120"))
 C2_DIFF = float(os.getenv("CONDITION_2_DIFF", "30"))
-C2_MIN_PROB = float(os.getenv("CONDITION_2_MIN_PROB", "0.0"))
-C2_MAX_PROB = float(os.getenv("CONDITION_2_MAX_PROB", "0.05"))
+C2_MIN_PROB = float(os.getenv("CONDITION_2_MIN_PROB", "0.80"))
+C2_MAX_PROB = float(os.getenv("CONDITION_2_MAX_PROB", "0.92"))
 
-# 条件3: 剩余60秒内,价差≥50,UP概率≥90%
+# 条件3: 剩余60秒内,价差≥50,UP概率80%-92%
 C3_TIME = int(os.getenv("CONDITION_3_TIME", "60"))
 C3_DIFF = float(os.getenv("CONDITION_3_DIFF", "50"))
-C3_MIN_PROB = float(os.getenv("CONDITION_3_MIN_PROB", "0.90"))
-C3_MAX_PROB = float(os.getenv("CONDITION_3_MAX_PROB", "1.0"))
+C3_MIN_PROB = float(os.getenv("CONDITION_3_MIN_PROB", "0.80"))
+C3_MAX_PROB = float(os.getenv("CONDITION_3_MAX_PROB", "0.92"))
 
-# 条件4: 剩余60秒内,价差≥50,DOWN概率≤20%
+# 条件4: 剩余60秒内,价差≥50,DOWN概率80%-92%
 C4_TIME = int(os.getenv("CONDITION_4_TIME", "60"))
 C4_DIFF = float(os.getenv("CONDITION_4_DIFF", "50"))
-C4_MIN_PROB = float(os.getenv("CONDITION_4_MIN_PROB", "0.0"))
-C4_MAX_PROB = float(os.getenv("CONDITION_4_MAX_PROB", "0.20"))
-
-# 条件5: 剩余40秒内,价差≥60 (激进，无概率限制)
-C5_TIME = int(os.getenv("CONDITION_5_TIME", "40"))
-C5_DIFF = float(os.getenv("CONDITION_5_DIFF", "60"))
+C4_MIN_PROB = float(os.getenv("CONDITION_4_MIN_PROB", "0.80"))
+C4_MAX_PROB = float(os.getenv("CONDITION_4_MAX_PROB", "0.92"))
 
 ORDER_TIMEOUT_SEC = int(os.getenv("ORDER_TIMEOUT_SEC", "8"))  # 下单后8秒未成交则撤单
 SLIPPAGE_THRESHOLD = float(os.getenv("SLIPPAGE_THRESHOLD", "0.05"))  # 滑点阈值5%
 MAX_RETRY_PER_MARKET = int(os.getenv("MAX_RETRY_PER_MARKET", "2"))  # 每市场最多尝试2次
+BUY_RETRY_STEP = max(0.001, float(os.getenv("BUY_RETRY_STEP", "0.01")))
+STOP_LOSS_PROB_PCT = float(os.getenv("STOP_LOSS_PROB_PCT", "0.15"))
+TAKE_PROFIT_RR = max(0.2, float(os.getenv("TAKE_PROFIT_RR", "1.0")))
+TAKE_PROFIT_CAP = min(0.995, max(0.55, float(os.getenv("TAKE_PROFIT_CAP", "0.99"))))
+TAKE_PROFIT_RETRY_STEP = max(0.001, float(os.getenv("TAKE_PROFIT_RETRY_STEP", "0.005")))
+TAKE_PROFIT_RETRY_MAX = max(1, int(os.getenv("TAKE_PROFIT_RETRY_MAX", "3")))
+MARKET_DATA_MAX_LAG_SEC = max(0.2, float(os.getenv("MARKET_DATA_MAX_LAG_SEC", "1.2")))
+LOOP_INTERVAL_SEC = max(0.1, float(os.getenv("LOOP_INTERVAL_SEC", "0.25")))
 
 # 风控配置
-STOP_LOSS_DIFF = float(os.getenv("STOP_LOSS_DIFF", "40"))
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "2"))
 
 AUTO_REDEEM = os.getenv("AUTO_REDEEM", "true").lower() == "true"
@@ -139,6 +142,13 @@ price_data = {
     "ptb": None,           # Price to Beat
     "up_price": None,      # UP token价格
     "down_price": None,    # DOWN token价格
+    "up_bid": None,
+    "up_ask": None,
+    "down_bid": None,
+    "down_ask": None,
+    "btc_update_ts": 0.0,
+    "up_update_ts": 0.0,
+    "down_update_ts": 0.0,
     "last_update": None,
 }
 
@@ -170,6 +180,11 @@ app = Flask(__name__, static_folder=STATIC_DIR)
 _market_found_log_state = {"slug": "", "kind": "", "last_ts": 0.0}
 _price_refresh_lock = threading.Lock()
 _price_refresh_running = False
+_market_cache_lock = threading.Lock()
+_market_cache = None
+_market_refresh_running = False
+_account_sync_lock = threading.Lock()
+_account_sync_running = False
 
 
 def _log_market_found_throttled(kind, slug, remaining):
@@ -195,6 +210,9 @@ def _trigger_price_refresh():
             chainlink_price = get_chainlink_btc_price()
             if chainlink_price:
                 price_data["btc"] = chainlink_price
+                ts = time.time()
+                price_data["btc_update_ts"] = ts
+                price_data["last_update"] = ts
 
             binance_price = get_binance_btc_price()
             if binance_price:
@@ -202,6 +220,60 @@ def _trigger_price_refresh():
         finally:
             with _price_refresh_lock:
                 _price_refresh_running = False
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _trigger_market_refresh():
+    global _market_refresh_running, _market_cache
+    with _market_cache_lock:
+        if _market_refresh_running:
+            return
+        _market_refresh_running = True
+
+    def worker():
+        global _market_refresh_running, _market_cache
+        try:
+            market = get_active_market()
+            with _market_cache_lock:
+                _market_cache = dict(market) if isinstance(market, dict) else None
+        finally:
+            with _market_cache_lock:
+                _market_refresh_running = False
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _get_market_cache():
+    with _market_cache_lock:
+        return dict(_market_cache) if isinstance(_market_cache, dict) else None
+
+
+def _clear_market_cache():
+    global _market_cache
+    with _market_cache_lock:
+        _market_cache = None
+
+
+def _trigger_account_sync(user):
+    global _account_sync_running
+    u = str(user or "").strip().lower()
+    if not u:
+        return
+    with _account_sync_lock:
+        if _account_sync_running:
+            return
+        _account_sync_running = True
+
+    def worker():
+        global _account_sync_running
+        try:
+            _sync_dashboard_account_snapshot(u)
+        except Exception:
+            pass
+        finally:
+            with _account_sync_lock:
+                _account_sync_running = False
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -574,9 +646,23 @@ def _normalize_state(state):
         state["pending_order"] = {}
     if not isinstance(state.get("last_order"), dict):
         state["last_order"] = {}
+    if not isinstance(state.get("take_profit_order"), dict):
+        state["take_profit_order"] = {}
     if not isinstance(state.get("trade_history"), list):
         state["trade_history"] = []
     return state
+
+
+def _dashboard_pending_order_from_state(state):
+    state = _normalize_state(state)
+    pending = dict(state.get("pending_order") or {})
+    if pending:
+        return pending
+    tp = dict(state.get("take_profit_order") or {})
+    if tp:
+        tp.setdefault("action", "SELL")
+        tp.setdefault("reason", "take_profit")
+    return tp
 
 
 def _append_trade_history(state, item):
@@ -1075,7 +1161,9 @@ class BTCPriceListener:
             data = json.loads(message)
             if "p" in data:  # 价格字段
                 price_data["btc"] = float(data["p"])
-                price_data["last_update"] = time.time()
+                ts = time.time()
+                price_data["btc_update_ts"] = ts
+                price_data["last_update"] = ts
         except:
             pass
     
@@ -1138,11 +1226,20 @@ class MarketPriceListener:
                         best_bid = max([float(b["price"]) for b in bids], default=0)
                         best_ask = min([float(a["price"]) for a in asks], default=0)
                         mid_price = (best_bid + best_ask) / 2
+                        ts = time.time()
                         
                         if asset_id == self.up_token:
+                            price_data["up_bid"] = best_bid
+                            price_data["up_ask"] = best_ask
                             price_data["up_price"] = mid_price
+                            price_data["up_update_ts"] = ts
+                            price_data["last_update"] = ts
                         elif asset_id == self.down_token:
+                            price_data["down_bid"] = best_bid
+                            price_data["down_ask"] = best_ask
                             price_data["down_price"] = mid_price
+                            price_data["down_update_ts"] = ts
+                            price_data["last_update"] = ts
                 
                 # 处理价格变化数据
                 elif event_type == "price_change":
@@ -1154,11 +1251,20 @@ class MarketPriceListener:
                         
                         if best_bid > 0 and best_ask > 0:
                             mid_price = (best_bid + best_ask) / 2
+                            ts = time.time()
                             
                             if asset_id == self.up_token:
+                                price_data["up_bid"] = best_bid
+                                price_data["up_ask"] = best_ask
                                 price_data["up_price"] = mid_price
+                                price_data["up_update_ts"] = ts
+                                price_data["last_update"] = ts
                             elif asset_id == self.down_token:
+                                price_data["down_bid"] = best_bid
+                                price_data["down_ask"] = best_ask
                                 price_data["down_price"] = mid_price
+                                price_data["down_update_ts"] = ts
+                                price_data["last_update"] = ts
         except:
             pass
     
@@ -1651,11 +1757,15 @@ def main():
     print(f"  条件2: 剩余≤{C2_TIME}秒 且 价差≥${C2_DIFF} (DOWN概率{C2_MIN_PROB*100:.0f}-{C2_MAX_PROB*100:.0f}%)")
     print(f"  条件3: 剩余≤{C3_TIME}秒 且 价差≥${C3_DIFF} (UP概率{C3_MIN_PROB*100:.0f}-{C3_MAX_PROB*100:.0f}%)")
     print(f"  条件4: 剩余≤{C4_TIME}秒 且 价差≥${C4_DIFF} (DOWN概率{C4_MIN_PROB*100:.0f}-{C4_MAX_PROB*100:.0f}%)")
-    print(f"  条件5: 剩余≤{C5_TIME}秒 且 价差≥${C5_DIFF} (激进)")
+    print(f"  止盈止损: 按买入概率比例计算 (止损{STOP_LOSS_PROB_PCT*100:.0f}%, 盈亏比≈{TAKE_PROFIT_RR:.2f}, 止盈上限{TAKE_PROFIT_CAP*100:.1f}%)")
     print(f"  撤单超时: {ORDER_TIMEOUT_SEC}秒")
     print(f"  滑点阈值: {SLIPPAGE_THRESHOLD*100:.0f}%")
     print(f"  每市场最多尝试: {MAX_RETRY_PER_MARKET}次")
-    print(f"  止损线: 价差<${STOP_LOSS_DIFF}")
+    print(f"  追价步长: 每次最多 +{BUY_RETRY_STEP*100:.1f}%")
+    print(f"  止盈重试: 最多{TAKE_PROFIT_RETRY_MAX}次, 每次提高{TAKE_PROFIT_RETRY_STEP*100:.1f}%")
+    print(f"  止损线: 入场概率下跌{STOP_LOSS_PROB_PCT*100:.0f}%触发")
+    print(f"  数据延迟保护: >{MARKET_DATA_MAX_LAG_SEC:.1f}s跳过追单")
+    print(f"  主循环频率: {LOOP_INTERVAL_SEC:.2f}s")
     print("="*60 + "\n")
     
     trader = Trader()
@@ -1669,7 +1779,7 @@ def main():
     init_state = load_state()
     _dashboard_set(
         position=dict(init_state.get("position") or {}),
-        pending_order=dict(init_state.get("pending_order") or {}),
+        pending_order=_dashboard_pending_order_from_state(init_state),
         last_order=dict(init_state.get("last_order") or {}),
         trade_history=list(init_state.get("trade_history") or []),
         wallet_balance=None,
@@ -1690,12 +1800,14 @@ def main():
     last_chainlink_update = 0
     last_account_sync = 0.0
     last_market_fetch = 0.0
-    market_data_cache = None
+    last_stale_log_ts = 0.0
     dashboard_user = (os.getenv("FUNDER_ADDRESS", "") or "").strip().lower()
     if not dashboard_user:
         dashboard_user = (os.getenv("PRIVATE_KEY_ADDRESS", "") or "").strip().lower()
     if AUTO_TRADE and trader.address:
         dashboard_user = ((os.getenv("FUNDER_ADDRESS", "") or trader.address) or "").strip().lower()
+    _trigger_market_refresh()
+    _trigger_account_sync(dashboard_user)
     
     try:
         while True:
@@ -1706,12 +1818,13 @@ def main():
                 _trigger_price_refresh()
                 last_chainlink_update = now
 
-            # 市场元数据低频拉取，剩余时间使用本地每秒递减
-            if (not market_data_cache) or (now - last_market_fetch >= MARKET_META_REFRESH_SEC):
-                market_data_cache = get_active_market()
+            # 市场元数据低频异步拉取，主循环不阻塞
+            if now - last_market_fetch >= MARKET_META_REFRESH_SEC:
+                _trigger_market_refresh()
                 last_market_fetch = now
 
             market = None
+            market_data_cache = _get_market_cache()
             if market_data_cache:
                 try:
                     end_ts = datetime.fromisoformat(str(market_data_cache.get("end", "")).replace("Z", "+00:00")).timestamp()
@@ -1719,14 +1832,14 @@ def main():
                 except Exception:
                     remaining_live = 0
                 if remaining_live <= 0:
-                    market_data_cache = None
+                    _clear_market_cache()
                     last_market_fetch = 0.0
                 else:
                     market = dict(market_data_cache)
                     market["remaining"] = remaining_live
 
             if now - last_account_sync >= DASHBOARD_ACCOUNT_SYNC_SEC:
-                _sync_dashboard_account_snapshot(dashboard_user)
+                _trigger_account_sync(dashboard_user)
                 last_account_sync = now
 
             if not market:
@@ -1743,7 +1856,7 @@ def main():
                         "diff_abs": None,
                     },
                     position=dict(state_snapshot.get("position") or {}),
-                    pending_order=dict(state_snapshot.get("pending_order") or {}),
+                    pending_order=_dashboard_pending_order_from_state(state_snapshot),
                     last_order=dict(state_snapshot.get("last_order") or {}),
                     trade_history=list(state_snapshot.get("trade_history") or []),
                 )
@@ -1751,7 +1864,7 @@ def main():
                     print("\n⏳ 等待活跃市场...")
                     if price_data["btc"]:
                         print(f"当前BTC价格(Chainlink): ${price_data['btc']:,.2f}")
-                time.sleep(1)
+                time.sleep(LOOP_INTERVAL_SEC)
                 continue
             
             slug = market["slug"]
@@ -1767,6 +1880,7 @@ def main():
                 state = load_state()
                 state.pop("position", None)
                 state.pop("last_order", None)
+                state.pop("take_profit_order", None)
                 save_state(state)
                 
                 # 启动新的市场监听
@@ -1801,10 +1915,18 @@ def main():
                     log(f"使用前一周期的closePrice作为PTB: {price_data['ptb']}", "INFO")
             
             # 从WebSocket获取的实时数据
-            btc = price_data["btc"] or 0  # 如果Chainlink获取失败,使用0
-            ptb = price_data["ptb"] or 0
-            up_price = price_data["up_price"] or market["up_price"]
-            down_price = price_data["down_price"] or market["down_price"]
+            btc = _to_float(price_data.get("btc"), 0.0)
+            ptb = _to_float(price_data.get("ptb"), 0.0)
+            up_price = _to_float(price_data.get("up_price") if price_data.get("up_price") is not None else market.get("up_price"), 0.0)
+            down_price = _to_float(price_data.get("down_price") if price_data.get("down_price") is not None else market.get("down_price"), 0.0)
+            up_bid = _maybe_float(price_data.get("up_bid"))
+            up_ask = _maybe_float(price_data.get("up_ask"))
+            down_bid = _maybe_float(price_data.get("down_bid"))
+            down_ask = _maybe_float(price_data.get("down_ask"))
+
+            # 下单使用可成交侧价格，避免中间价带来的追单偏差
+            up_entry_price = up_ask if (up_ask is not None and up_ask > 0) else up_price
+            down_entry_price = down_ask if (down_ask is not None and down_ask > 0) else down_price
             
             # 计算价差
             diff = btc - ptb if (btc > 0 and ptb > 0) else 0
@@ -1824,6 +1946,10 @@ def main():
                     "binance_btc": (price_data.get("binance") or None),
                     "up_price": up_price,
                     "down_price": down_price,
+                    "up_bid": up_bid,
+                    "up_ask": up_ask,
+                    "down_bid": down_bid,
+                    "down_ask": down_ask,
                     "diff": diff if (btc > 0 and ptb > 0) else None,
                     "diff_abs": diff_abs if (btc > 0 and ptb > 0) else None,
                     "updated_ts": time.time(),
@@ -1833,7 +1959,7 @@ def main():
             state_snapshot = load_state()
             _dashboard_set(
                 position=dict(state_snapshot.get("position") or {}),
-                pending_order=dict(state_snapshot.get("pending_order") or {}),
+                pending_order=_dashboard_pending_order_from_state(state_snapshot),
                 last_order=dict(state_snapshot.get("last_order") or {}),
                 trade_history=list(state_snapshot.get("trade_history") or []),
             )
@@ -1887,17 +2013,17 @@ def main():
             
             # 条件1: 剩余120秒内,价差为正且≥30,UP概率高
             if remaining <= C1_TIME and diff >= C1_DIFF:
-                prob = up_price
+                prob = up_entry_price
                 if C1_MIN_PROB <= prob <= C1_MAX_PROB:
                     triggered = True
                     desired_side = "UP"
                     condition = f"条件1: 剩余≤{C1_TIME}s 且 价差≥${C1_DIFF} (UP概率{prob*100:.0f}%)"
                 else:
-                    log(f"条件1跳过: UP概率{prob*100:.1f}% < {C1_MIN_PROB*100:.0f}%", "INFO")
+                    log(f"条件1跳过: UP概率{prob*100:.1f}% 不在 {C1_MIN_PROB*100:.0f}%~{C1_MAX_PROB*100:.0f}%", "INFO")
             
             # 条件2: 剩余120秒内,价差为负且≤-阈值,DOWN概率高
             elif remaining <= C2_TIME and diff <= -C2_DIFF:
-                prob = down_price
+                prob = down_entry_price
                 if C2_MIN_PROB <= prob <= C2_MAX_PROB:
                     triggered = True
                     desired_side = "DOWN"
@@ -1907,17 +2033,17 @@ def main():
             
             # 条件3: 剩余60秒内,价差为正且≥50,UP概率高
             elif remaining <= C3_TIME and diff >= C3_DIFF:
-                prob = up_price
+                prob = up_entry_price
                 if C3_MIN_PROB <= prob <= C3_MAX_PROB:
                     triggered = True
                     desired_side = "UP"
                     condition = f"条件3: 剩余≤{C3_TIME}s 且 价差≥${C3_DIFF} (UP概率{prob*100:.0f}%)"
                 else:
-                    log(f"条件3跳过: UP概率{prob*100:.1f}% < {C3_MIN_PROB*100:.0f}%", "INFO")
+                    log(f"条件3跳过: UP概率{prob*100:.1f}% 不在 {C3_MIN_PROB*100:.0f}%~{C3_MAX_PROB*100:.0f}%", "INFO")
             
             # 条件4: 剩余60秒内,价差为负且≤-阈值,DOWN概率高
             elif remaining <= C4_TIME and diff <= -C4_DIFF:
-                prob = down_price
+                prob = down_entry_price
                 if C4_MIN_PROB <= prob <= C4_MAX_PROB:
                     triggered = True
                     desired_side = "DOWN"
@@ -1925,15 +2051,28 @@ def main():
                 else:
                     log(f"条件4跳过: DOWN概率{prob*100:.1f}% 不在 {C4_MIN_PROB*100:.0f}%~{C4_MAX_PROB*100:.0f}%", "INFO")
             
-            # 条件5: 剩余40秒内,价差≥60 (激进，无概率限制)
-            elif remaining <= C5_TIME and diff_abs >= C5_DIFF:
-                triggered = True
-                condition = f"条件5: 剩余≤{C5_TIME}s 且 价差≥${C5_DIFF} (激进)"
-            
             if triggered:
                 side = desired_side or ("UP" if diff > 0 else "DOWN")
-                price = up_price if side == "UP" else down_price
+                price = up_entry_price if side == "UP" else down_entry_price
                 token = market["up_token"] if side == "UP" else market["down_token"]
+
+                # 价格流延迟保护：数据陈旧时跳过，避免慢2-3秒追单
+                side_ts = _to_float(price_data.get("up_update_ts" if side == "UP" else "down_update_ts"), 0.0)
+                btc_ts = _to_float(price_data.get("btc_update_ts"), 0.0)
+                side_age = now - side_ts if side_ts > 0 else 999.0
+                btc_age = now - btc_ts if btc_ts > 0 else 999.0
+                if price <= 0:
+                    triggered = False
+                    condition = None
+                elif side_age > MARKET_DATA_MAX_LAG_SEC or btc_age > MARKET_DATA_MAX_LAG_SEC:
+                    if now - last_stale_log_ts >= 2:
+                        log(
+                            f"数据延迟跳过: {side}盘口延迟{side_age:.2f}s, BTC延迟{btc_age:.2f}s (阈值{MARKET_DATA_MAX_LAG_SEC:.1f}s)",
+                            "WARN",
+                        )
+                        last_stale_log_ts = now
+                    triggered = False
+                    condition = None
                 
                 # 检查是否已下单
                 state = load_state()
@@ -1944,7 +2083,7 @@ def main():
                 pending_order = state.get("pending_order")
                 _dashboard_set(
                     position=dict(state.get("position") or {}),
-                    pending_order=dict(pending_order or {}),
+                    pending_order=_dashboard_pending_order_from_state(state),
                     last_order=dict(last_order or {}),
                 )
                 if pending_order:
@@ -1965,7 +2104,7 @@ def main():
                                 save_state(state)
                                 _dashboard_set(
                                     position=dict(state.get("position") or {}),
-                                    pending_order={},
+                                    pending_order=_dashboard_pending_order_from_state(state),
                                     last_order=dict(state.get("last_order") or {}),
                                 )
                             elif order_status and order_status.get("filled"):
@@ -1975,11 +2114,13 @@ def main():
                                 filled_slug = pending_order.get("slug") or slug
                                 log(f"订单已成交! {filled_side} @ {filled_price*100:.2f}% (市场: {filled_slug})", "TRADE")
                                 state.pop("pending_order", None)
+                                filled_size = float(order_status.get("size_matched") or order_status.get("original_size") or TRADE_AMOUNT)
                                 state["position"] = {
                                     "slug": filled_slug,
                                     "side": filled_side,
                                     "entry_price": filled_price,
-                                    "entry_diff": diff_abs
+                                    "entry_diff": diff_abs,
+                                    "size": filled_size,
                                 }
                                 state = _append_trade_history(state, {
                                     "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1996,17 +2137,31 @@ def main():
                                 save_state(state)
                                 _dashboard_set(
                                     position=dict(state.get("position") or {}),
-                                    pending_order={},
+                                    pending_order=_dashboard_pending_order_from_state(state),
                                     last_order=dict(state.get("last_order") or {}),
                                     trade_history=list(state.get("trade_history") or []),
                                 )
                                 _sync_dashboard_account_snapshot(dashboard_user)
                 
-                # 如果没有pending订单且未记录过此订单,则下单
+                # 如果没有pending订单且未持仓,则尝试下单（含限幅重试）
                 has_position = bool(state.get("position"))
-                if not pending_order and (not has_position) and last_order.get("key") != order_key:
+                retry_count = int(last_order.get("retry_count", 0) or 0)
+                same_key_retry = (last_order.get("key") == order_key)
+                can_place = (not pending_order) and (not has_position) and ((not same_key_retry) or (retry_count < MAX_RETRY_PER_MARKET))
+                if can_place:
+                    # 同一方向重试时，限制每次最多加一个最小价位（例如 0.80 -> 0.81）
+                    if same_key_retry and retry_count > 0:
+                        last_price = _to_float(last_order.get("last_price"), price)
+                        retry_cap_price = min(0.995, last_price + BUY_RETRY_STEP)
+                        if price > retry_cap_price:
+                            log(
+                                f"限制追价: 当前{price*100:.2f}% > 上次{last_price*100:.2f}%+{BUY_RETRY_STEP*100:.2f}%, 调整为{retry_cap_price*100:.2f}%",
+                                "INFO",
+                            )
+                        price = min(price, retry_cap_price)
+
                     # 检查滑点：当前价格与下单价格差异
-                    current_price = up_price if side == "UP" else down_price
+                    current_price = up_entry_price if side == "UP" else down_entry_price
                     if price > 0:
                         slippage = abs(current_price - price) / price
                         if slippage > SLIPPAGE_THRESHOLD:
@@ -2016,8 +2171,7 @@ def main():
                     
                     # 检查尝试次数：同一市场避免多次追单
                     if triggered:
-                        retry_count = last_order.get("retry_count", 0)
-                        if retry_count >= MAX_RETRY_PER_MARKET:
+                        if same_key_retry and retry_count >= MAX_RETRY_PER_MARKET:
                             log(f"尝试次数已达上限({MAX_RETRY_PER_MARKET}次), 跳过 {order_key}", "WARN")
                             triggered = False
                             condition = None
@@ -2038,11 +2192,12 @@ def main():
                                 "price": price
                             }
                             # 记录尝试次数
-                            current_retry = last_order.get("retry_count", 0)
+                            current_retry = retry_count if same_key_retry else 0
                             state["last_order"] = {
                                 "key": order_key, 
                                 "time": datetime.now().isoformat(),
-                                "retry_count": current_retry + 1
+                                "retry_count": current_retry + 1,
+                                "last_price": price,
                             }
                             state = _append_trade_history(state, {
                                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2058,7 +2213,7 @@ def main():
                             })
                             save_state(state)
                             _dashboard_set(
-                                pending_order=dict(state.get("pending_order") or {}),
+                                pending_order=_dashboard_pending_order_from_state(state),
                                 last_order=dict(state.get("last_order") or {}),
                                 trade_history=list(state.get("trade_history") or []),
                             )
@@ -2067,7 +2222,13 @@ def main():
                         else:
                             # 下单失败,记录避免重复尝试
                             log(f"下单失败: {side} @ {price*100:.1f}%", "ERR")
-                            state["last_order"] = {"key": order_key, "time": datetime.now().isoformat()}
+                            current_retry = retry_count if same_key_retry else 0
+                            state["last_order"] = {
+                                "key": order_key,
+                                "time": datetime.now().isoformat(),
+                                "retry_count": current_retry + 1,
+                                "last_price": price,
+                            }
                             state = _append_trade_history(state, {
                                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 "slug": slug,
@@ -2088,41 +2249,183 @@ def main():
                             _sync_dashboard_account_snapshot(dashboard_user)
                     else:
                         log(f"提醒模式: 建议买入 {side} @ {price*100:.1f}%", "TRADE")
-                        state["last_order"] = {"key": order_key, "time": datetime.now().isoformat()}
+                        current_retry = retry_count if same_key_retry else 0
+                        state["last_order"] = {
+                            "key": order_key,
+                            "time": datetime.now().isoformat(),
+                            "retry_count": current_retry + 1,
+                            "last_price": price,
+                        }
                         save_state(state)
                         _dashboard_set(last_order=dict(state.get("last_order") or {}))
             
-            # 止损检查
+            # 持仓止盈/止损检查
             state = load_state()
             pos = state.get("position")
+            tp_order = state.get("take_profit_order") or {}
             if pos and pos.get("slug") == slug:
-                if diff_abs < STOP_LOSS_DIFF:
-                    log(f"止损触发! 价差${diff_abs:.0f} < ${STOP_LOSS_DIFF}", "TRADE")
-                    
+                pos_side = pos.get("side")
+                current_prob = up_price if pos_side == "UP" else down_price
+                position_size = max(0.001, _to_float(pos.get("size"), TRADE_AMOUNT))
+                entry_prob = _maybe_float(pos.get("entry_price"))
+                stop_loss_triggered = False
+                stop_prob = None
+                tp_trigger_prob = None
+                tp_sell_price = None
+                if entry_prob is not None and entry_prob > 0:
+                    stop_prob = max(0.0, entry_prob * (1.0 - STOP_LOSS_PROB_PCT))
+                    risk_abs = max(0.0, entry_prob - stop_prob)
+                    tp_trigger_prob = min(TAKE_PROFIT_CAP, entry_prob + risk_abs * TAKE_PROFIT_RR)
+                    if tp_trigger_prob <= entry_prob:
+                        tp_trigger_prob = None
+                    else:
+                        # 当止盈受上限约束时，收紧止损，尽量保持设定盈亏比
+                        balanced_risk = (tp_trigger_prob - entry_prob) / TAKE_PROFIT_RR
+                        balanced_stop_prob = max(0.0, entry_prob - balanced_risk)
+                        if balanced_stop_prob > stop_prob:
+                            stop_prob = balanced_stop_prob
+                        tp_sell_price = tp_trigger_prob
+                    stop_loss_triggered = (current_prob > 0) and (current_prob <= stop_prob)
+
+                # 已有止盈挂单时，先监控成交状态
+                if tp_order and tp_order.get("slug") == slug and tp_order.get("side") == pos_side and AUTO_TRADE and trader.connected:
+                    tp_order_id = tp_order.get("order_id")
+                    tp_status = trader.get_order_status(tp_order_id)
+                    if tp_status and tp_status.get("filled"):
+                        tp_price = float(tp_order.get("price") or tp_sell_price or 0.0)
+                        tp_amount = max(0.001, _to_float(tp_order.get("amount"), position_size))
+                        state = _append_trade_history(state, {
+                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "slug": slug,
+                            "action": "SELL",
+                            "side": pos_side,
+                            "price": tp_price,
+                            "amount": tp_amount,
+                            "order_id": tp_order_id or "",
+                            "status": "filled",
+                            "reason": "take_profit",
+                            "diff": diff,
+                        })
+                        state.pop("take_profit_order", None)
+                        state.pop("position", None)
+                        save_state(state)
+                        _dashboard_set(
+                            position={},
+                            pending_order=_dashboard_pending_order_from_state(state),
+                            trade_history=list(state.get("trade_history") or []),
+                        )
+                        _sync_dashboard_account_snapshot(dashboard_user)
+                        log(f"止盈挂单成交: {pos_side} @ {tp_price*100:.2f}%", "TRADE")
+                        pos = None
+                        tp_order = {}
+                    elif tp_status and tp_status.get("status") in ["CANCELED", "CANCELLED", "REJECTED", "EXPIRED"]:
+                        log("止盈挂单已失效，等待再次触发", "WARN")
+                        state.pop("take_profit_order", None)
+                        save_state(state)
+                        _dashboard_set(pending_order=_dashboard_pending_order_from_state(state))
+                        tp_order = {}
+
+                # 按买入价盈亏比触发止盈挂单
+                if pos and (not tp_order) and tp_trigger_prob is not None and current_prob > 0 and current_prob >= tp_trigger_prob:
+                    log(
+                        f"止盈触发: 入场{entry_prob*100:.1f}%, 当前{current_prob*100:.1f}%, 目标{tp_trigger_prob*100:.1f}% (RR≈{TAKE_PROFIT_RR:.2f})",
+                        "TRADE",
+                    )
                     if AUTO_TRADE and trader.connected:
-                        pos_side = pos.get("side")
-                        sell_price = up_price if pos_side == "UP" else down_price
                         sell_token = market["up_token"] if pos_side == "UP" else market["down_token"]
-                        sell_order_id = trader.place_order(sell_token, "SELL", sell_price, TRADE_AMOUNT)
+                        tp_order_id = None
+                        tp_submit_price = tp_sell_price
+                        attempt_price = tp_sell_price
+                        for attempt_idx in range(TAKE_PROFIT_RETRY_MAX):
+                            tp_order_id = trader.place_order(sell_token, "SELL", attempt_price, position_size)
+                            if tp_order_id:
+                                tp_submit_price = attempt_price
+                                break
+                            if attempt_idx + 1 >= TAKE_PROFIT_RETRY_MAX:
+                                break
+                            next_price = min(TAKE_PROFIT_CAP, attempt_price + TAKE_PROFIT_RETRY_STEP)
+                            if next_price <= attempt_price + 1e-9:
+                                break
+                            log(
+                                f"止盈挂单重试 {attempt_idx+2}/{TAKE_PROFIT_RETRY_MAX}: 提高到{next_price*100:.1f}%",
+                                "WARN",
+                            )
+                            attempt_price = next_price
+                        if tp_order_id:
+                            state["take_profit_order"] = {
+                                "order_id": tp_order_id,
+                                "time": datetime.now().isoformat(),
+                                "slug": slug,
+                                "side": pos_side,
+                                "price": tp_submit_price,
+                                "amount": position_size,
+                                "action": "SELL",
+                                "reason": "take_profit",
+                            }
+                            state = _append_trade_history(state, {
+                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "slug": slug,
+                                "action": "SELL",
+                                "side": pos_side,
+                                "price": tp_submit_price,
+                                "amount": position_size,
+                                "order_id": tp_order_id,
+                                "status": "submitted",
+                                "reason": "take_profit",
+                                "diff": diff,
+                            })
+                            save_state(state)
+                            _dashboard_set(
+                                pending_order=_dashboard_pending_order_from_state(state),
+                                trade_history=list(state.get("trade_history") or []),
+                            )
+                            _sync_dashboard_account_snapshot(dashboard_user)
+                            tp_order = dict(state.get("take_profit_order") or {})
+                            log(f"止盈挂单已提交 (订单ID: {tp_order_id})", "TRADE")
+                        else:
+                            log(f"止盈挂单失败: {pos_side} @ {attempt_price*100:.1f}%", "ERR")
+                    else:
+                        log(f"提醒模式: 建议挂单卖出 {pos_side} @ {tp_sell_price*100:.1f}% (数量{position_size:.4f})", "TRADE")
+
+                if pos and stop_loss_triggered:
+                    log(
+                        f"止损触发! 当前{pos_side}概率{current_prob*100:.1f}% <= 止损线{stop_prob*100:.1f}% (入场{entry_prob*100:.1f}%)",
+                        "TRADE",
+                    )
+
+                    if AUTO_TRADE and trader.connected:
+                        # 若已有止盈挂单，先撤单避免重复卖出
+                        if tp_order and tp_order.get("order_id"):
+                            trader.cancel_order(tp_order.get("order_id"))
+                            state.pop("take_profit_order", None)
+
+                        sell_price = (up_bid if pos_side == "UP" else down_bid) or (up_price if pos_side == "UP" else down_price)
+                        sell_token = market["up_token"] if pos_side == "UP" else market["down_token"]
+                        sell_order_id = trader.place_order(sell_token, "SELL", sell_price, position_size)
                         state = _append_trade_history(state, {
                             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             "slug": slug,
                             "action": "SELL",
                             "side": pos_side,
                             "price": sell_price,
-                            "amount": TRADE_AMOUNT,
+                            "amount": position_size,
                             "order_id": sell_order_id or "",
                             "status": "submitted" if sell_order_id else "failed",
                             "reason": "stop_loss",
                             "diff": diff,
                         })
                         state.pop("position", None)
+                        state.pop("take_profit_order", None)
                         save_state(state)
-                        _dashboard_set(position={}, trade_history=list(state.get("trade_history") or []))
+                        _dashboard_set(
+                            position={},
+                            pending_order=_dashboard_pending_order_from_state(state),
+                            trade_history=list(state.get("trade_history") or []),
+                        )
                         _sync_dashboard_account_snapshot(dashboard_user)
                         log(f"止损卖出完成: {pos_side} @ {sell_price*100:.2f}%", "TRADE")
             
-            time.sleep(1)  # 每1秒刷新一次
+            time.sleep(LOOP_INTERVAL_SEC)
             
     except KeyboardInterrupt:
         print("\n\n退出监控")
